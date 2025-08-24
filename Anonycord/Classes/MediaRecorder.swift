@@ -8,16 +8,53 @@
 import AVFoundation
 import Photos
 import UIKit
+import MediaPlayer
 
 class MediaRecorder: ObservableObject {
     private var recordingSession: AVAudioSession!
     private var audioRecorder: AVAudioRecorder!
     private var videoOutput: AVCaptureMovieFileOutput!
     private var captureSession: AVCaptureSession!
-    private var photoOutput: AVCapturePhotoOutput!
     
     private let videoRecordingDelegate = VideoRecordingDelegate()
-    private let photoCaptureDelegate = PhotoCaptureDelegate()
+    
+    // 锁屏检测
+    private var lockScreenObserver: NSObjectProtocol?
+    
+    init() {
+        setupLockScreenDetection()
+    }
+    
+    deinit {
+        if let observer = lockScreenObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+    
+    private func setupLockScreenDetection() {
+        lockScreenObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.willResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleAppWillResignActive()
+        }
+    }
+    
+    private func handleAppWillResignActive() {
+        // 应用即将进入后台，可能是锁屏
+        if isRecordingVideo() {
+            stopVideoRecording()
+            // 延迟保存和退出，确保录制完成
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                self.saveCurrentVideoAndExit()
+            }
+        }
+    }
+    
+    private func isRecordingVideo() -> Bool {
+        return videoOutput?.isRecording ?? false
+    }
     
     func requestPermissions() {
         AVCaptureDevice.requestAccess(for: .video) { _ in }
@@ -32,13 +69,9 @@ class MediaRecorder: ObservableObject {
     func setupCaptureSession() {
         captureSession = AVCaptureSession()
         
-        switch AppSettings().videoQuality {
-        case "4K":
+        // 设置为4K 120帧
+        if captureSession.canSetSessionPreset(.hd4K3840x2160) {
             captureSession.sessionPreset = .hd4K3840x2160
-        case "1080p":
-            captureSession.sessionPreset = .hd1920x1080
-        default:
-            captureSession.sessionPreset = .high
         }
         
         setupVideoInput()
@@ -62,20 +95,9 @@ class MediaRecorder: ObservableObject {
             }
         }
         
-        let cameraPosition: AVCaptureDevice.Position
-        var cameraType: AVCaptureDevice.DeviceType
-        
-        switch AppSettings().cameraType {
-        case "Selfie":
-            cameraPosition = .front
-            cameraType = .builtInWideAngleCamera
-        case "UltraWide":
-            cameraPosition = .back
-            cameraType = .builtInUltraWideCamera
-        default:
-            cameraPosition = .back
-            cameraType = .builtInWideAngleCamera
-        }
+        // 使用后置广角摄像头
+        let cameraPosition: AVCaptureDevice.Position = .back
+        let cameraType: AVCaptureDevice.DeviceType = .builtInWideAngleCamera
         
         let devices = AVCaptureDevice.DiscoverySession(
             deviceTypes: [.builtInWideAngleCamera, .builtInUltraWideCamera],
@@ -113,9 +135,11 @@ class MediaRecorder: ObservableObject {
             captureSession.addOutput(videoOutput)
         }
         
-        photoOutput = AVCapturePhotoOutput()
-        if captureSession.canAddOutput(photoOutput) {
-            captureSession.addOutput(photoOutput)
+        // 配置视频输出以支持杜比视界
+        if let connection = videoOutput.connection(with: .video) {
+            if connection.isVideoStabilizationSupported {
+                connection.preferredVideoStabilizationMode = .auto
+            }
         }
     }
     
@@ -132,11 +156,14 @@ class MediaRecorder: ObservableObject {
     
     func startAudioRecording() {
         let audioFilename = getDocumentsDirectory().appendingPathComponent("recording.m4a")
+        
+        // 配置空间音频设置
         let settings: [String: Any] = [
             AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-            AVSampleRateKey: AppSettings().micSampleRate,
-            AVNumberOfChannelsKey: AppSettings().channelDef,
-            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
+            AVSampleRateKey: 48000, // 48kHz for spatial audio
+            AVNumberOfChannelsKey: 2, // 立体声
+            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
+            AVEncoderBitRateKey: 320000 // 320kbps for high quality
         ]
         
         do {
@@ -157,13 +184,6 @@ class MediaRecorder: ObservableObject {
         promptSaveAudioToFiles(audioURL: audioURL)
     }
     
-    func takePhoto() {
-        guard photoOutput != nil else { return }
-        
-        let settings = AVCapturePhotoSettings()
-        photoOutput.capturePhoto(with: settings, delegate: photoCaptureDelegate)
-    }
-    
     func saveVideoToLibrary(videoURL: URL) {
         PHPhotoLibrary.shared().performChanges({
             PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: videoURL)
@@ -172,11 +192,21 @@ class MediaRecorder: ObservableObject {
                 print("Error saving video: \(error.localizedDescription)")
             } else {
                 print("Video saved to library")
-                if AppSettings().crashAtEnd {
-                    exitWithStyle()
-                }
             }
         })
+    }
+    
+    private func saveCurrentVideoAndExit() {
+        // 保存当前录制的视频到相册
+        let videoURL = getDocumentsDirectory().appendingPathComponent("video.mov")
+        if FileManager.default.fileExists(atPath: videoURL.path) {
+            saveVideoToLibrary(videoURL: videoURL)
+        }
+        
+        // 延迟退出应用
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            exit(0)
+        }
     }
     
     private func deleteOldVideos() {
