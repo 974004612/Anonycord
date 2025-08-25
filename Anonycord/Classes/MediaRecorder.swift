@@ -69,9 +69,12 @@ class MediaRecorder: ObservableObject {
     func setupCaptureSession() {
         captureSession = AVCaptureSession()
         
-        // 设置为4K 120帧
+        // 使用4K预设，后续将以activeFormat强制帧率
         if captureSession.canSetSessionPreset(.hd4K3840x2160) {
             captureSession.sessionPreset = .hd4K3840x2160
+        } else {
+            captureSession.sessionPreset = .high
+            print("[Anonycord] 设备不支持4K预设，已降级为 .high")
         }
         
         setupVideoInput()
@@ -105,12 +108,79 @@ class MediaRecorder: ObservableObject {
             position: cameraPosition
         ).devices
         
-        guard let cameraDevice = devices.first(where: { $0.deviceType == cameraType }) else {
+        guard let cameraDevice = devices.first(where: { $0.deviceType == cameraType }) ?? devices.first else {
             print("No available camera found.")
             return
         }
         
         do {
+            try cameraDevice.lockForConfiguration()
+            
+            // 选择支持 4K(3840x2160) 且 120fps，并且支持HDR的视频格式
+            let desiredWidth: Int32 = 3840
+            let desiredHeight: Int32 = 2160
+            let desiredFPS: Double = 120.0
+            var selectedFormat: AVCaptureDevice.Format?
+            var bestMaxFPS: Double = 0
+            
+            for format in cameraDevice.formats {
+                let desc = format.formatDescription
+                let dims = CMVideoFormatDescriptionGetDimensions(desc)
+                guard dims.width == desiredWidth && dims.height == desiredHeight else { continue }
+                
+                // 帧率范围
+                let ranges = format.videoSupportedFrameRateRanges
+                guard let maxRange = ranges.max(by: { $0.maxFrameRate < $1.maxFrameRate }) else { continue }
+                
+                // HDR 支持
+                let hdrSupported = format.isVideoHDRSupported
+                
+                // 颜色空间（优先HLG，其次P3）
+                let supportsHLG = format.supportedColorSpaces.contains(.HLG)
+                let supportsP3 = format.supportedColorSpaces.contains(.P3_D65)
+                
+                // 需要满足：支持HDR，且最大帧率>=120
+                guard hdrSupported && maxRange.maxFrameRate >= desiredFPS else { continue }
+                
+                // 选取最大可用帧率且优先支持HLG的格式
+                let score = maxRange.maxFrameRate + (supportsHLG ? 1000 : (supportsP3 ? 10 : 0))
+                if score > bestMaxFPS {
+                    bestMaxFPS = score
+                    selectedFormat = format
+                }
+            }
+            
+            if let selectedFormat = selectedFormat {
+                cameraDevice.activeFormat = selectedFormat
+                
+                // 设置色彩空间（优先HLG，杜比视界录制在系统支持时将使用HLG/Dolby Vision元数据）
+                if selectedFormat.supportedColorSpaces.contains(.HLG) {
+                    if #available(iOS 16.0, *) {
+                        cameraDevice.activeColorSpace = .HLG
+                    }
+                } else if selectedFormat.supportedColorSpaces.contains(.P3_D65) {
+                    if #available(iOS 16.0, *) {
+                        cameraDevice.activeColorSpace = .P3_D65
+                    }
+                }
+                
+                // 固定为120fps
+                let duration = CMTimeMake(value: 1, timescale: Int32(desiredFPS))
+                cameraDevice.activeVideoMinFrameDuration = duration
+                cameraDevice.activeVideoMaxFrameDuration = duration
+                
+                // 启用视频HDR（杜比视界/HLG由系统决定）
+                if cameraDevice.isVideoHDREnabled == false && cameraDevice.isVideoHDRSupported {
+                    cameraDevice.automaticallyAdjustsVideoHDREnabled = false
+                    cameraDevice.isVideoHDREnabled = true
+                }
+            } else {
+                print("[Anonycord] 未找到支持 4K@120fps 且HDR 的相机格式。设备可能不支持该组合。")
+            }
+            
+            cameraDevice.unlockForConfiguration()
+            
+            // 添加输入
             let videoInput = try AVCaptureDeviceInput(device: cameraDevice)
             if captureSession.canAddInput(videoInput) {
                 captureSession.addInput(videoInput)
@@ -118,7 +188,7 @@ class MediaRecorder: ObservableObject {
                 print("Unable to add video input (?)")
             }
         } catch {
-            print("error creating video input \(error)")
+            print("error configuring/adding video input \(error)")
         }
     }
     
@@ -135,10 +205,10 @@ class MediaRecorder: ObservableObject {
             captureSession.addOutput(videoOutput)
         }
         
-        // 配置视频输出以支持杜比视界
+        // 配置视频连接：防抖 + HDR 优化
         if let connection = videoOutput.connection(with: .video) {
             if connection.isVideoStabilizationSupported {
-                connection.preferredVideoStabilizationMode = .auto
+                connection.preferredVideoStabilizationMode = .cinematic
             }
         }
     }
