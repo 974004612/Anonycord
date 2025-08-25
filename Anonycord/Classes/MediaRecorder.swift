@@ -116,61 +116,75 @@ class MediaRecorder: ObservableObject {
         do {
             try cameraDevice.lockForConfiguration()
             
-            // 选择支持 4K(3840x2160) 且 120fps，并且支持HDR的视频格式
+            // 固定为 4K@120（SDR） 优先
             let desiredWidth: Int32 = 3840
             let desiredHeight: Int32 = 2160
             let desiredFPS: Double = 120.0
             var selectedFormat: AVCaptureDevice.Format?
-            var bestScore: Double = 0
+            var selectedFPS: Double = desiredFPS
+            var bestScore: Double = -1
             
             for format in cameraDevice.formats {
                 let desc = format.formatDescription
                 let dims = CMVideoFormatDescriptionGetDimensions(desc)
                 guard dims.width == desiredWidth && dims.height == desiredHeight else { continue }
-                
-                // 帧率范围
-                let ranges = format.videoSupportedFrameRateRanges
-                guard let maxRange = ranges.max(by: { $0.maxFrameRate < $1.maxFrameRate }) else { continue }
-                
-                // HDR 支持
-                let hdrSupported = format.isVideoHDRSupported
-                
-                // 颜色空间（iOS 里仅公开 .sRGB / .P3_D65）
+                guard let maxRange = format.videoSupportedFrameRateRanges.max(by: { $0.maxFrameRate < $1.maxFrameRate }) else { continue }
+                guard maxRange.maxFrameRate >= desiredFPS else { continue }
+                // 优先选择支持 P3 的格式
                 let supportsP3 = format.supportedColorSpaces.contains(.P3_D65)
-                
-                // 需要满足：支持HDR，且最大帧率>=120
-                guard hdrSupported && maxRange.maxFrameRate >= desiredFPS else { continue }
-                
-                // 评分：最大可用帧率 + P3 优先
                 let score = maxRange.maxFrameRate + (supportsP3 ? 10 : 0)
                 if score > bestScore {
                     bestScore = score
                     selectedFormat = format
+                    selectedFPS = desiredFPS
+                }
+            }
+            
+            // 如果没有 4K@120，则回退到 4K 的最高可用帧率（SDR）
+            if selectedFormat == nil {
+                var fallbackBest: Double = -1
+                var fallbackFormat: AVCaptureDevice.Format?
+                var fallbackFPS: Double = 60.0
+                for format in cameraDevice.formats {
+                    let desc = format.formatDescription
+                    let dims = CMVideoFormatDescriptionGetDimensions(desc)
+                    guard dims.width == desiredWidth && dims.height == desiredHeight else { continue }
+                    guard let maxRange = format.videoSupportedFrameRateRanges.max(by: { $0.maxFrameRate < $1.maxFrameRate }) else { continue }
+                    let supportsP3 = format.supportedColorSpaces.contains(.P3_D65)
+                    let score = maxRange.maxFrameRate + (supportsP3 ? 10 : 0)
+                    if score > fallbackBest {
+                        fallbackBest = score
+                        fallbackFormat = format
+                        fallbackFPS = min(maxRange.maxFrameRate, desiredFPS)
+                    }
+                }
+                if let f = fallbackFormat {
+                    selectedFormat = f
+                    selectedFPS = fallbackFPS
+                    print("[Anonycord] 未找到 4K@120，回退至 4K@\(Int(fallbackFPS))（SDR）")
                 }
             }
             
             if let selectedFormat = selectedFormat {
                 cameraDevice.activeFormat = selectedFormat
                 
-                // 设置色彩空间（优先 P3_D65）
+                // 可选设置 P3 色彩空间（仍为 SDR）
                 if selectedFormat.supportedColorSpaces.contains(.P3_D65) {
                     if #available(iOS 16.0, *) {
                         cameraDevice.activeColorSpace = .P3_D65
                     }
                 }
                 
-                // 固定为120fps
-                let duration = CMTimeMake(value: 1, timescale: Int32(desiredFPS))
+                // 锁定帧率
+                let duration = CMTimeMake(value: 1, timescale: Int32(selectedFPS))
                 cameraDevice.activeVideoMinFrameDuration = duration
                 cameraDevice.activeVideoMaxFrameDuration = duration
                 
-                // 启用视频HDR（杜比视界由系统在支持时自动处理）
-                if cameraDevice.activeFormat.isVideoHDRSupported {
-                    cameraDevice.automaticallyAdjustsVideoHDREnabled = false
-                    cameraDevice.isVideoHDREnabled = true
-                }
+                // 关闭 HDR，确保 SDR
+                cameraDevice.automaticallyAdjustsVideoHDREnabled = false
+                cameraDevice.isVideoHDREnabled = false
             } else {
-                print("[Anonycord] 未找到支持 4K@120fps 且HDR 的相机格式。设备可能不支持该组合。")
+                print("[Anonycord] 未找到 4K 视频格式。设备可能不支持 4K 录制。")
             }
             
             cameraDevice.unlockForConfiguration()
@@ -200,10 +214,15 @@ class MediaRecorder: ObservableObject {
             captureSession.addOutput(videoOutput)
         }
         
-        // 配置视频连接：防抖 + HDR 优化
         if let connection = videoOutput.connection(with: .video) {
+            // 关闭防抖避免帧率受限
             if connection.isVideoStabilizationSupported {
-                connection.preferredVideoStabilizationMode = .cinematic
+                connection.preferredVideoStabilizationMode = .off
+            }
+            
+            // 优先使用 HEVC（10-bit HDR 依赖 HEVC）
+            if videoOutput.availableVideoCodecTypes.contains(.hevc) {
+                videoOutput.setOutputSettings([AVVideoCodecKey: AVVideoCodecType.hevc], for: connection)
             }
         }
     }
@@ -309,3 +328,4 @@ class MediaRecorder: ObservableObject {
         return false
     }
 }
+
