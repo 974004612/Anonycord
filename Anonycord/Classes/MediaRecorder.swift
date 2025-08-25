@@ -165,7 +165,7 @@ class MediaRecorder: ObservableObject {
                 cameraDevice.activeVideoMaxFrameDuration = duration
                 
                 // 启用视频HDR（杜比视界由系统在支持时自动处理）
-                if cameraDevice.isVideoHDREnabled == false && cameraDevice.isVideoHDRSupported {
+                if cameraDevice.activeFormat.isVideoHDRSupported {
                     cameraDevice.automaticallyAdjustsVideoHDREnabled = false
                     cameraDevice.isVideoHDREnabled = true
                 }
