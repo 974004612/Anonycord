@@ -121,7 +121,7 @@ class MediaRecorder: ObservableObject {
             let desiredHeight: Int32 = 2160
             let desiredFPS: Double = 120.0
             var selectedFormat: AVCaptureDevice.Format?
-            var bestMaxFPS: Double = 0
+            var bestScore: Double = 0
             
             for format in cameraDevice.formats {
                 let desc = format.formatDescription
@@ -135,17 +135,16 @@ class MediaRecorder: ObservableObject {
                 // HDR 支持
                 let hdrSupported = format.isVideoHDRSupported
                 
-                // 颜色空间（优先HLG，其次P3）
-                let supportsHLG = format.supportedColorSpaces.contains(.HLG)
+                // 颜色空间（iOS 里仅公开 .sRGB / .P3_D65）
                 let supportsP3 = format.supportedColorSpaces.contains(.P3_D65)
                 
                 // 需要满足：支持HDR，且最大帧率>=120
                 guard hdrSupported && maxRange.maxFrameRate >= desiredFPS else { continue }
                 
-                // 选取最大可用帧率且优先支持HLG的格式
-                let score = maxRange.maxFrameRate + (supportsHLG ? 1000 : (supportsP3 ? 10 : 0))
-                if score > bestMaxFPS {
-                    bestMaxFPS = score
+                // 评分：最大可用帧率 + P3 优先
+                let score = maxRange.maxFrameRate + (supportsP3 ? 10 : 0)
+                if score > bestScore {
+                    bestScore = score
                     selectedFormat = format
                 }
             }
@@ -153,12 +152,8 @@ class MediaRecorder: ObservableObject {
             if let selectedFormat = selectedFormat {
                 cameraDevice.activeFormat = selectedFormat
                 
-                // 设置色彩空间（优先HLG，杜比视界录制在系统支持时将使用HLG/Dolby Vision元数据）
-                if selectedFormat.supportedColorSpaces.contains(.HLG) {
-                    if #available(iOS 16.0, *) {
-                        cameraDevice.activeColorSpace = .HLG
-                    }
-                } else if selectedFormat.supportedColorSpaces.contains(.P3_D65) {
+                // 设置色彩空间（优先 P3_D65）
+                if selectedFormat.supportedColorSpaces.contains(.P3_D65) {
                     if #available(iOS 16.0, *) {
                         cameraDevice.activeColorSpace = .P3_D65
                     }
@@ -169,7 +164,7 @@ class MediaRecorder: ObservableObject {
                 cameraDevice.activeVideoMinFrameDuration = duration
                 cameraDevice.activeVideoMaxFrameDuration = duration
                 
-                // 启用视频HDR（杜比视界/HLG由系统决定）
+                // 启用视频HDR（杜比视界由系统在支持时自动处理）
                 if cameraDevice.isVideoHDREnabled == false && cameraDevice.isVideoHDRSupported {
                     cameraDevice.automaticallyAdjustsVideoHDREnabled = false
                     cameraDevice.isVideoHDREnabled = true
