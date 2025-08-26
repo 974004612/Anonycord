@@ -116,21 +116,21 @@ class MediaRecorder: ObservableObject {
         do {
             try cameraDevice.lockForConfiguration()
             
-            // 固定为 4K@120（SDR） 优先
+            // 固定为 4K@60（SDR）
             let desiredWidth: Int32 = 3840
             let desiredHeight: Int32 = 2160
-            let desiredFPS: Double = 120.0
+            let desiredFPS: Double = 60.0
             var selectedFormat: AVCaptureDevice.Format?
             var selectedFPS: Double = desiredFPS
             var bestScore: Double = -1
             
+            // 先选 4K@60（SDR）
             for format in cameraDevice.formats {
                 let desc = format.formatDescription
                 let dims = CMVideoFormatDescriptionGetDimensions(desc)
                 guard dims.width == desiredWidth && dims.height == desiredHeight else { continue }
                 guard let maxRange = format.videoSupportedFrameRateRanges.max(by: { $0.maxFrameRate < $1.maxFrameRate }) else { continue }
                 guard maxRange.maxFrameRate >= desiredFPS else { continue }
-                // 优先选择支持 P3 的格式
                 let supportsP3 = format.supportedColorSpaces.contains(.P3_D65)
                 let score = maxRange.maxFrameRate + (supportsP3 ? 10 : 0)
                 if score > bestScore {
@@ -140,11 +140,11 @@ class MediaRecorder: ObservableObject {
                 }
             }
             
-            // 如果没有 4K@120，则回退到 4K 的最高可用帧率（SDR）
+            // 如果没有 4K@60，则回退到 4K 的最高可用帧率（SDR）
             if selectedFormat == nil {
                 var fallbackBest: Double = -1
                 var fallbackFormat: AVCaptureDevice.Format?
-                var fallbackFPS: Double = 60.0
+                var fallbackFPS: Double = 30.0
                 for format in cameraDevice.formats {
                     let desc = format.formatDescription
                     let dims = CMVideoFormatDescriptionGetDimensions(desc)
@@ -161,7 +161,9 @@ class MediaRecorder: ObservableObject {
                 if let f = fallbackFormat {
                     selectedFormat = f
                     selectedFPS = fallbackFPS
-                    print("[Anonycord] 未找到 4K@120，回退至 4K@\(Int(fallbackFPS))（SDR）")
+                    print("[Anonycord] 未找到 4K@60，回退至 4K@\(Int(fallbackFPS))（SDR）")
+                } else {
+                    print("[Anonycord] 未找到 4K 视频格式。设备可能不支持 4K 录制。")
                 }
             }
             
@@ -183,8 +185,6 @@ class MediaRecorder: ObservableObject {
                 // 关闭 HDR，确保 SDR
                 cameraDevice.automaticallyAdjustsVideoHDREnabled = false
                 cameraDevice.isVideoHDREnabled = false
-            } else {
-                print("[Anonycord] 未找到 4K 视频格式。设备可能不支持 4K 录制。")
             }
             
             cameraDevice.unlockForConfiguration()

@@ -20,6 +20,7 @@ struct ContentView: View {
         }
         .onAppear(perform: setupAndStartRecording)
         .preferredColorScheme(.dark) // 强制深色模式
+        .statusBar(hidden: true) // 隐藏状态栏
     }
     
     private func setupAndStartRecording() {
